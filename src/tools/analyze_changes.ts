@@ -5,6 +5,7 @@ import {
   getUntrackedFiles,
   isGitRepo,
 } from "../modules/git.js";
+import { filterFiles, filterFilePaths } from "../modules/filter.js";
 
 /**
  * Categorizes a file by its extension into a human-readable type.
@@ -104,8 +105,30 @@ export function registerAnalyzeChangesTool(server: McpServer): void {
       }
 
       try {
-        const diff = getStructuredDiff(project_path, scope);
-        const untrackedFiles = scope === "unstaged" ? getUntrackedFiles(project_path) : [];
+        const rawDiff = getStructuredDiff(project_path, scope);
+        const rawUntracked = scope === "unstaged" ? getUntrackedFiles(project_path) : [];
+
+        // Filter out noise: node_modules, lock files, build artifacts, binaries
+        const filteredFiles = filterFiles(rawDiff.files);
+        const untrackedFiles = filterFilePaths(rawUntracked);
+
+        // Recalculate totals based on filtered files only
+        let totalAdditions = 0;
+        let totalDeletions = 0;
+        for (const file of filteredFiles) {
+          totalAdditions += file.additions;
+          totalDeletions += file.deletions;
+        }
+
+        const diff = {
+          files: filteredFiles,
+          totalAdditions,
+          totalDeletions,
+          rawDiff: rawDiff.rawDiff,
+        };
+
+        const skippedCount = rawDiff.files.length - filteredFiles.length;
+        const skippedUntrackedCount = rawUntracked.length - untrackedFiles.length;
 
         // If nothing changed, say so clearly
         if (diff.files.length === 0 && untrackedFiles.length === 0) {
@@ -194,6 +217,17 @@ export function registerAnalyzeChangesTool(server: McpServer): void {
           lines.push(`- **Status**: ${file.status}`);
           lines.push(`- **Type**: ${categorizeFile(file.filePath)}`);
           lines.push(`- **Changes**: +${file.additions} additions, -${file.deletions} deletions`);
+          lines.push("");
+        }
+
+        // Note about filtered files so the developer knows what was excluded
+        const totalSkipped = skippedCount + skippedUntrackedCount;
+        if (totalSkipped > 0) {
+          lines.push("---");
+          lines.push(
+            `*${totalSkipped} file(s) excluded from this report ` +
+            `(node_modules, lock files, build artifacts, binaries, etc.)*`
+          );
           lines.push("");
         }
 
