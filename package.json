@@ -1,0 +1,28 @@
+{
+  "name": "afterglow-mcp",
+  "version": "0.0.1",
+  "description": "MCP server that briefs developers on AI-generated code changes with architecture diagrams",
+  "type": "module",
+  "main": "build/index.js",
+  "bin": {
+    "afterglow-mcp": "./build/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node build/index.js",
+    "dev": "tsc --watch",
+    "inspect": "npm run build && npx @modelcontextprotocol/inspector node build/index.js"
+  },
+  "files": ["build"],
+  "keywords": ["mcp", "code-analysis", "developer-tools", "architecture", "education"],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0"
+  }
+}
