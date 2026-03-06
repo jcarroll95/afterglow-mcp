@@ -3,6 +3,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { registerPingTool } from "./tools/ping.js";
 import { registerAnalyzeChangesTool } from "./tools/analyze_changes.js";
 import { registerExplainConnectionsTool } from "./tools/explain_connections.js";
+import { registerGenerateDiagramTool } from "./tools/generate_diagram.js";
+import { registerBriefingTool } from "./tools/briefing.js";
 
 /**
  * Create and configure the MCP server.
@@ -10,17 +12,15 @@ import { registerExplainConnectionsTool } from "./tools/explain_connections.js";
 function createServer(): McpServer {
   const server = new McpServer({
     name: "afterglow-mcp",
-    version: "0.1.0",
+    version: "0.2.0",
   });
 
   // Register all tools
   registerPingTool(server);
   registerAnalyzeChangesTool(server);
   registerExplainConnectionsTool(server);
-
-  // Future tools:
-  // registerGenerateDiagramTool(server);
-  // registerBriefingTool(server);
+  registerGenerateDiagramTool(server);
+  registerBriefingTool(server);
 
   return server;
 }
