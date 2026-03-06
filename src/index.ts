@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerPingTool } from "./tools/ping.js";
 import { registerAnalyzeChangesTool } from "./tools/analyze_changes.js";
+import { registerExplainConnectionsTool } from "./tools/explain_connections.js";
 
 /**
  * Create and configure the MCP server.
@@ -15,9 +16,9 @@ function createServer(): McpServer {
   // Register all tools
   registerPingTool(server);
   registerAnalyzeChangesTool(server);
+  registerExplainConnectionsTool(server);
 
   // Future tools:
-  // registerExplainConnectionsTool(server);
   // registerGenerateDiagramTool(server);
   // registerBriefingTool(server);
 
