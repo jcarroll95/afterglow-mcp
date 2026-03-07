@@ -176,9 +176,9 @@ export function registerGenerateDiagramTool(server: McpServer): void {
           "*"
         );
         lines.push("");
-        lines.push("```mermaid");
+        lines.push("~~~mermaid");
         lines.push(mermaidSource);
-        lines.push("```");
+        lines.push("~~~");
 
         // Legend
         lines.push("");

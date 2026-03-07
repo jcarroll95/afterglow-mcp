@@ -13,7 +13,7 @@ import { registerBriefingTool } from "./tools/briefing.js";
 function createServer(): McpServer {
   const server = new McpServer({
     name: "afterglow-mcp",
-    version: "0.2.0",
+    version: "0.4.1",
   });
 
   // Register all tools
