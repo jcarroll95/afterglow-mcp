@@ -9,6 +9,8 @@ import {
   getImportsOf,
   getImportersOf,
 } from "../modules/graph.js";
+import { getExportNames } from "../types.js";
+import { summarizeRelationships } from "../modules/semantics.js";
 
 /**
  * Registers the afterglow_explain_connections tool.
@@ -19,6 +21,11 @@ import {
  * 3. Extracts a neighborhood subgraph around the file
  * 4. Produces a plain-English explanation of how the file fits
  *    into the project architecture
+ *
+ * v0.5 UPGRADES:
+ *   - Uses semantic verbs for dependency descriptions ("builds graph" not "buildGraph")
+ *   - Shows architectural layer for the focus file and its connections
+ *   - Uses getExportNames() for backward-compatible export display
  */
 export function registerExplainConnectionsTool(server: McpServer): void {
   server.registerTool(
@@ -142,12 +149,16 @@ export function registerExplainConnectionsTool(server: McpServer): void {
         lines.push(`# Afterglow: Connections for \`${relativeFile}\``);
         lines.push("");
 
-        // File identity
+        // File identity — v0.5: show architectural layer + export signatures
         if (focusNode) {
           lines.push(`**Type**: ${focusNode.category}`);
-          if (focusNode.exports.length > 0) {
+          if (focusNode.architecturalLayer) {
+            lines.push(`**Layer**: ${focusNode.architecturalLayer}`);
+          }
+          const exportNames = getExportNames(focusNode.exports);
+          if (exportNames.length > 0) {
             lines.push(
-              `**Exports**: ${focusNode.exports.map((e) => `\`${e}\``).join(", ")}`
+              `**Exports**: ${exportNames.map((e) => `\`${e}\``).join(", ")}`
             );
           }
           lines.push("");
@@ -172,7 +183,7 @@ export function registerExplainConnectionsTool(server: McpServer): void {
           lines.push("");
         }
 
-        // What this file depends on
+        // What this file depends on — v0.5: semantic verb labels
         if (importsEdges.length > 0) {
           lines.push("## Dependencies (what this file imports)");
           lines.push("");
@@ -181,21 +192,37 @@ export function registerExplainConnectionsTool(server: McpServer): void {
               (n) => n.filePath === edge.to
             );
             const targetType = targetNode?.category ?? "Unknown";
+            const targetLayer = targetNode?.architecturalLayer;
+            const layerLabel = targetLayer ? ` · ${targetLayer}` : "";
 
-            if (edge.symbols.length > 0) {
+            // v0.5: Use semantic relationship label when available
+            const relationship = edge.relationships
+              ? summarizeRelationships(edge.relationships)
+              : edge.symbols.length > 0
+                ? edge.symbols.map((s) => `\`${s}\``).join(", ")
+                : "side-effect import";
+
+            if (edge.relationships && edge.relationships.length > 0) {
+              // Semantic format: "Builds graph, extracts subgraph → graph.ts"
+              const capitalized = relationship[0].toUpperCase() + relationship.slice(1);
               lines.push(
-                `- **\`${edge.to}\`** (${targetType}) — imports ${edge.symbols.map((s) => `\`${s}\``).join(", ")}`
+                `- ${capitalized} → **\`${edge.to}\`** (${targetType}${layerLabel})`
+              );
+            } else if (edge.symbols.length > 0) {
+              // Legacy format: imports `symbol1`, `symbol2`
+              lines.push(
+                `- **\`${edge.to}\`** (${targetType}${layerLabel}) — imports ${relationship}`
               );
             } else {
               lines.push(
-                `- **\`${edge.to}\`** (${targetType}) — side-effect import`
+                `- **\`${edge.to}\`** (${targetType}${layerLabel}) — side-effect import`
               );
             }
           }
           lines.push("");
         }
 
-        // What depends on this file
+        // What depends on this file — v0.5: show what they use
         if (importerEdges.length > 0) {
           lines.push("## Dependents (what imports this file)");
           lines.push("");
@@ -204,14 +231,24 @@ export function registerExplainConnectionsTool(server: McpServer): void {
               (n) => n.filePath === edge.from
             );
             const sourceType = sourceNode?.category ?? "Unknown";
+            const sourceLayer = sourceNode?.architecturalLayer;
+            const layerLabel = sourceLayer ? ` · ${sourceLayer}` : "";
 
-            if (edge.symbols.length > 0) {
+            // v0.5: Show what the importer does with this file
+            const relationship = edge.relationships
+              ? summarizeRelationships(edge.relationships)
+              : edge.symbols.length > 0
+                ? `uses ${edge.symbols.map((s) => `\`${s}\``).join(", ")}`
+                : "side-effect import";
+
+            if (edge.relationships && edge.relationships.length > 0) {
+              const capitalized = relationship[0].toUpperCase() + relationship.slice(1);
               lines.push(
-                `- **\`${edge.from}\`** (${sourceType}) — uses ${edge.symbols.map((s) => `\`${s}\``).join(", ")}`
+                `- **\`${edge.from}\`** (${sourceType}${layerLabel}) — ${capitalized}`
               );
             } else {
               lines.push(
-                `- **\`${edge.from}\`** (${sourceType}) — side-effect import`
+                `- **\`${edge.from}\`** (${sourceType}${layerLabel}) — ${relationship}`
               );
             }
           }
@@ -241,7 +278,8 @@ export function registerExplainConnectionsTool(server: McpServer): void {
           if (extendedFiles.length > 0) {
             lines.push("Files connected through intermediaries:");
             for (const node of extendedFiles) {
-              lines.push(`- \`${node.filePath}\` (${node.category})`);
+              const layer = node.architecturalLayer ?? node.category;
+              lines.push(`- \`${node.filePath}\` (${layer})`);
             }
             lines.push("");
           }

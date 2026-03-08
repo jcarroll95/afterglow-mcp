@@ -3,6 +3,8 @@ import { existsSync, readdirSync, statSync } from "fs";
 import { DependencyGraph, GraphNode, GraphEdge } from "../types.js";
 import { analyzeFile, isParseableFile } from "./parser.js";
 import { shouldIgnoreFile } from "./filter.js";
+import { inferEdgeRelationships } from "./semantics.js";
+import { getLayerName } from "./boundaries.js";
 
 // ─── Import Path Resolution ──────────────────────────────────────────
 
@@ -145,6 +147,11 @@ function categorizeFile(filePath: string): string {
  * resolves relative imports to actual files, and returns a
  * DependencyGraph with nodes and edges.
  *
+ * v0.5 UPGRADES:
+ *   - Nodes now include architecturalLayer (from boundaries.ts)
+ *   - Nodes now include ExportSignature[] (from parser.ts upgrade)
+ *   - Edges now include semantic relationships (from semantics.ts)
+ *
  * The graph is JSON-serializable by design — ready for future
  * persistence to .afterglow/state.json.
  */
@@ -171,6 +178,8 @@ export function buildGraph(projectRoot: string): DependencyGraph {
       filePath: relPath,
       exports: analysis?.exports ?? [],
       category: categorizeFile(relPath),
+      // v0.5: classify by architectural role, not just file extension
+      architecturalLayer: getLayerName(relPath),
     });
   }
 
@@ -191,11 +200,18 @@ export function buildGraph(projectRoot: string): DependencyGraph {
       const toRelative = absToRelative.get(resolved);
       if (!toRelative) continue; // Resolved to a file outside our source scan
 
+      // v0.5: infer semantic relationships for imported symbols
+      const relationships =
+        imp.specifiers.length > 0
+          ? inferEdgeRelationships(imp.specifiers, absPath)
+          : undefined;
+
       edges.push({
         from: fromRelative,
         to: toRelative,
         symbols: imp.specifiers,
         isDefault: imp.isDefault,
+        relationships,
       });
     }
   }

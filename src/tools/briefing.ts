@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { resolve, relative } from "path";
+import { resolve } from "path";
 import {
   getStructuredDiff,
   getUntrackedFiles,
@@ -14,7 +14,19 @@ import {
   getImportsOf,
   getImportersOf,
 } from "../modules/graph.js";
-import { generateMermaid, generateSimpleMermaid } from "../modules/mermaid.js";
+import { generateMermaid, generateSimpleMermaid, computeImpactScores } from "../modules/mermaid.js";
+import {
+  ExportSignature,
+  getExportNames,
+  DIAGRAM_LIMITS,
+} from "../types.js";
+import {
+  getLayerName,
+  detectHierarchy,
+  detectViolations,
+  LayerViolation,
+} from "../modules/boundaries.js";
+import { summarizeRelationships } from "../modules/semantics.js";
 
 /**
  * Categorize a file by extension. Duplicated from analyze_changes for now —
@@ -42,11 +54,59 @@ function categorizeFile(filePath: string): string {
 }
 
 /**
+ * Format an ExportSignature as a readable API line.
+ *
+ * Examples:
+ *   "buildGraph(projectRoot: string) → DependencyGraph"
+ *   "shouldIgnoreFile(filePath: string) → boolean"
+ *   "DependencyGraph (interface)"
+ *   "DEFAULT_LAYERS (const)"
+ */
+function formatExportSignature(sig: ExportSignature): string {
+  if (sig.kind === "function") {
+    const params = sig.params ? `(${sig.params})` : "()";
+    const ret = sig.returnType ? ` → ${sig.returnType}` : "";
+    return `\`${sig.name}${params}${ret}\``;
+  }
+
+  if (sig.kind === "class") {
+    return `\`${sig.name}\` (class)`;
+  }
+
+  if (sig.kind === "interface") {
+    return `\`${sig.name}\` (interface)`;
+  }
+
+  if (sig.kind === "type") {
+    return `\`${sig.name}\` (type)`;
+  }
+
+  if (sig.kind === "enum") {
+    return `\`${sig.name}\` (enum)`;
+  }
+
+  if (sig.kind === "const" || sig.kind === "let" || sig.kind === "var") {
+    const typeAnnotation = sig.returnType ? `: ${sig.returnType}` : "";
+    return `\`${sig.name}${typeAnnotation}\` (${sig.kind})`;
+  }
+
+  // Default export or unknown kind
+  return `\`${sig.name}\``;
+}
+
+/**
  * Registers the afterglow_briefing tool.
  *
  * This is the flagship tool. It combines change analysis, connection
  * tracing, and diagram generation into a single educational briefing
  * about what just happened to the project.
+ *
+ * v0.5 UPGRADES:
+ *   - "What Changed" groups by architectural layer, not file extension
+ *   - "How These Changes Connect" uses semantic verbs (builds, registers, checks)
+ *   - New "API Surface" section shows public contracts of changed files
+ *   - Architecture diagram uses change-status styling (modified/new/existing)
+ *   - Architecture diagram uses subgraph grouping by architectural layer
  */
 export function registerBriefingTool(server: McpServer): void {
   server.registerTool(
@@ -63,6 +123,7 @@ export function registerBriefingTool(server: McpServer): void {
         "The briefing includes:\n" +
         "  - What files changed and how (additions, modifications, deletions)\n" +
         "  - How changed files connect to the rest of the project\n" +
+        "  - The API surface (public exports) of changed files\n" +
         "  - A Mermaid architecture diagram of the affected area\n" +
         "  - Key observations about the architectural impact\n\n" +
         "Args:\n" +
@@ -144,6 +205,21 @@ export function registerBriefingTool(server: McpServer): void {
           };
         }
 
+        // ── Build change status sets for diagram styling ─────────
+
+        const modifiedFiles = new Set<string>(
+          filteredFiles
+            .filter((f) => f.status === "modified" || f.status === "renamed")
+            .map((f) => f.filePath)
+        );
+
+        const newFiles = new Set<string>([
+          ...filteredFiles
+            .filter((f) => f.status === "added")
+            .map((f) => f.filePath),
+          ...untrackedFiles,
+        ]);
+
         // ── Phase 2: Build Dependency Graph ──────────────────────
 
         const fullGraph = buildGraph(project_path);
@@ -177,21 +253,22 @@ export function registerBriefingTool(server: McpServer): void {
         lines.push("");
 
         // ── Section: What Changed ────────────────────────────────
+        // v0.5: Group by architectural layer instead of file extension
 
         lines.push("## What Changed");
         lines.push("");
 
-        // Group by category
-        const byCategory = new Map<string, typeof filteredFiles>();
+        // Group by architectural layer
+        const byLayer = new Map<string, typeof filteredFiles>();
         for (const file of filteredFiles) {
-          const cat = categorizeFile(file.filePath);
-          const group = byCategory.get(cat) ?? [];
+          const layer = getLayerName(file.filePath);
+          const group = byLayer.get(layer) ?? [];
           group.push(file);
-          byCategory.set(cat, group);
+          byLayer.set(layer, group);
         }
 
-        for (const [category, files] of byCategory) {
-          lines.push(`**${category}**`);
+        for (const [layer, files] of byLayer) {
+          lines.push(`**${layer}**`);
           for (const file of files) {
             const emoji =
               file.status === "added"
@@ -209,14 +286,26 @@ export function registerBriefingTool(server: McpServer): void {
         }
 
         if (untrackedFiles.length > 0) {
-          lines.push("**New Untracked Files**");
+          // Group untracked files by layer too
+          const untrackedByLayer = new Map<string, string[]>();
           for (const file of untrackedFiles) {
-            lines.push(`- 🆕 \`${file}\` (${categorizeFile(file)})`);
+            const layer = getLayerName(file);
+            const group = untrackedByLayer.get(layer) ?? [];
+            group.push(file);
+            untrackedByLayer.set(layer, group);
+          }
+
+          lines.push("**New Untracked Files**");
+          for (const [layer, files] of untrackedByLayer) {
+            for (const file of files) {
+              lines.push(`- 🆕 \`${file}\` (${layer})`);
+            }
           }
           lines.push("");
         }
 
         // ── Section: How It Connects ─────────────────────────────
+        // v0.5: Uses semantic verbs instead of raw symbol names
 
         if (parseableChanged.length > 0 && subgraph.edges.length > 0) {
           lines.push("## How These Changes Connect");
@@ -229,19 +318,21 @@ export function registerBriefingTool(server: McpServer): void {
             // Only include files that have connections
             if (imports.length === 0 && importers.length === 0) continue;
 
-            lines.push(`**\`${changedFile}\`**`);
+            // Show architectural layer in the header
+            const layer = getLayerName(changedFile);
+            lines.push(`**\`${changedFile}\`** (${layer})`);
 
             if (imports.length > 0) {
-              const importList = imports
-                .map((e) => {
-                  const symbols =
-                    e.symbols.length > 0
-                      ? ` (${e.symbols.join(", ")})`
-                      : "";
-                  return `\`${e.to}\`${symbols}`;
-                })
-                .join(", ");
-              lines.push(`- Depends on: ${importList}`);
+              for (const edge of imports) {
+                // v0.5: Use semantic relationship labels when available
+                const label = edge.relationships
+                  ? summarizeRelationships(edge.relationships)
+                  : edge.symbols.length > 0
+                    ? edge.symbols.join(", ")
+                    : "imports";
+
+                lines.push(`- ${capitalize(label)} → \`${edge.to}\``);
+              }
             }
 
             if (importers.length > 0) {
@@ -255,25 +346,116 @@ export function registerBriefingTool(server: McpServer): void {
           }
         }
 
+        // ── Section: API Surface ─────────────────────────────────
+        // v0.5: NEW — shows the public contract of changed files
+
+        const filesWithExports = parseableChanged
+          .map((fp) => {
+            const node = fullGraph.nodes.find((n) => n.filePath === fp);
+            if (!node) return null;
+            const exportNames = getExportNames(node.exports);
+            if (exportNames.length === 0) return null;
+            return { filePath: fp, node };
+          })
+          .filter((x): x is NonNullable<typeof x> => x !== null);
+
+        if (filesWithExports.length > 0) {
+          lines.push("## API Surface");
+          lines.push("");
+
+          for (const { filePath, node } of filesWithExports) {
+            const layer = node.architecturalLayer ?? getLayerName(filePath);
+            lines.push(`**\`${filePath}\`** (${layer}) exposes:`);
+
+            // Check if we have rich ExportSignature[] or plain string[]
+            if (
+              node.exports.length > 0 &&
+              typeof node.exports[0] !== "string"
+            ) {
+              // Rich signatures — show full API info
+              for (const sig of node.exports as ExportSignature[]) {
+                lines.push(`- ${formatExportSignature(sig)}`);
+              }
+            } else {
+              // Plain string names — fallback display
+              for (const name of getExportNames(node.exports)) {
+                lines.push(`- \`${name}\``);
+              }
+            }
+
+            lines.push("");
+          }
+        }
+
+        // ── Phase 3b: Detect Hierarchy & Violations ────────────────
+
+        const allNodePaths = fullGraph.nodes.map((n) => n.filePath);
+        const hierarchy = detectHierarchy(allNodePaths);
+
+        // Build node → layer name map for violation detection
+        const nodeLayerMap = new Map<string, string>();
+        for (const node of fullGraph.nodes) {
+          nodeLayerMap.set(node.filePath, node.architecturalLayer ?? getLayerName(node.filePath));
+        }
+
+        // Only detect violations if the project has hierarchical structure
+        const violations: LayerViolation[] = hierarchy.isHierarchical
+          ? detectViolations(subgraph.edges, nodeLayerMap)
+          : [];
+
         // ── Section: Architecture Diagram ────────────────────────
+        // v0.6: Impact scoring, truncation, dotted context edges,
+        //       violation styling, auto TB direction
 
         if (subgraph.nodes.length > 1) {
           lines.push("## Architecture");
           lines.push("");
 
-          const useSimple = subgraph.edges.length > 15;
-          const mermaidSource = useSimple
-            ? generateSimpleMermaid(subgraph, { direction: "LR" })
-            : generateMermaid(subgraph, { direction: "LR" });
+          // Compute impact scores for smart truncation
+          const impactScores = computeImpactScores(
+            subgraph, modifiedFiles, newFiles, fullGraph, violations
+          );
+
+          // Let mermaid.ts auto-decide direction and simple vs detailed
+          const mermaidSource = generateMermaid(subgraph, {
+            modifiedFiles,
+            newFiles,
+            impactScores,
+            violations,
+          });
 
           lines.push("```mermaid");
           lines.push(mermaidSource);
           lines.push("```");
           lines.push("");
-          lines.push(
-            `*Showing ${subgraph.nodes.length} files and ` +
-            `${subgraph.edges.length} connections in the affected area.*`
-          );
+
+          // Legend
+          const truncatedCount = subgraph.nodes.length -
+            subgraph.nodes.filter((n) => {
+              const impact = impactScores.get(n.filePath);
+              return subgraph.nodes.length <= DIAGRAM_LIMITS.MAX_NODES ||
+                (impact?.score ?? 0) >= DIAGRAM_LIMITS.MIN_SCORE;
+            }).length;
+
+          let legend =
+            "*✏️ Red = modified · 🆕 Green = new · Gray = existing context";
+          if (violations.length > 0) {
+            legend += " · ⚠️ Red arrows = layer violations";
+          }
+          legend += " · Dotted arrows = context-only connections";
+
+          const visibleCount = subgraph.nodes.length - truncatedCount;
+          legend += ` · Showing ${visibleCount} files and ` +
+            `${subgraph.edges.length} connections in the affected area.*`;
+          lines.push(legend);
+
+          if (truncatedCount > 0) {
+            lines.push("");
+            lines.push(
+              `*${truncatedCount} low-impact context files omitted for readability. ` +
+              `Use \`afterglow_explain_connections\` on a specific file to see its full neighborhood.*`
+            );
+          }
           lines.push("");
         }
 
@@ -286,6 +468,15 @@ export function registerBriefingTool(server: McpServer): void {
           fullGraph,
           subgraph
         );
+
+        // v0.6: Add violation observations
+        for (const v of violations) {
+          const emoji = v.severity === "warning" ? "⚠️" : "ℹ️";
+          observations.push(
+            `${emoji} **Layer violation**: ${v.explanation} ` +
+            `Consider extracting shared logic into a lower layer (utility or service).`
+          );
+        }
 
         if (observations.length > 0) {
           lines.push("## Key Observations");
@@ -325,6 +516,17 @@ export function registerBriefingTool(server: McpServer): void {
       }
     }
   );
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────
+
+/**
+ * Capitalize the first letter of a string.
+ * "builds graph" → "Builds graph"
+ */
+function capitalize(s: string): string {
+  if (!s) return s;
+  return s[0].toUpperCase() + s.slice(1);
 }
 
 // ─── Observation Generator ─────────────────────────────────────────
@@ -406,6 +608,19 @@ function generateObservations(
         );
       }
     }
+  }
+
+  // Cross-layer changes (v0.5: detect when changes span multiple layers)
+  const changedLayers = new Set(
+    changedFiles.map((f) => getLayerName(f.filePath))
+  );
+  if (changedLayers.size >= 3) {
+    const layerList = [...changedLayers].join(", ");
+    observations.push(
+      `Changes span **${changedLayers.size} architectural layers** (${layerList}). ` +
+      `Cross-cutting changes like this may indicate a new feature being wired through ` +
+      `multiple levels of the stack.`
+    );
   }
 
   // Ratio of config to source changes
